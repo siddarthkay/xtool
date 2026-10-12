@@ -11,14 +11,34 @@ public struct Packer: Sendable {
         self.buildSettings = buildSettings
     }
 
-    private func build() async throws {
-        let xtoolDir = URL(fileURLWithPath: "xtool")
-        let packageDir = xtoolDir.appendingPathComponent(".xtool-tmp")
-        try? FileManager.default.removeItem(at: packageDir)
-        try FileManager.default.createDirectory(at: packageDir, withIntermediateDirectories: true)
+    static let frameworksDirectoryName = "Frameworks"
 
-        let packageSwift = packageDir.appendingPathComponent("Package.swift")
-        let contents = """
+    static func builderManifest(for plan: Plan) -> String {
+        let frameworkTargets = plan.allProducts
+            .flatMap(\.frameworks)
+            .map(\.name)
+            .reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
+
+        let executableTargets = plan.allProducts.map { product in
+            let dependencies = [".product(name: \"\(product.product)\", package: \"RootPackage\")"]
+                + product.frameworks.map { "\"\($0.name)\"" }
+            return """
+                    .executableTarget(
+                        name: "\(product.targetName)",
+                        dependencies: [
+                            \(dependencies.map { "\($0)," }.joined(separator: "\n                "))
+                        ],
+                        linkerSettings: \(product.linkerSettings)
+                    ),
+            """
+        }
+        let binaryTargets = frameworkTargets.map { name in
+            """
+                    .binaryTarget(name: "\(name)", path: "\(frameworksDirectoryName)/\(name).xcframework"),
+            """
+        }
+
+        return """
         // swift-tools-version: 6.0
         import PackageDescription
         let package = Package(
@@ -30,24 +50,30 @@ public struct Packer: Sendable {
                 .package(name: "RootPackage", path: "../.."),
             ],
             targets: [
-                \(
-                    plan.allProducts.map {
-                        """
-                        .executableTarget(
-                            name: "\($0.targetName)",
-                            dependencies: [
-                                .product(name: "\($0.product)", package: "RootPackage"),
-                            ],
-                            linkerSettings: \($0.linkerSettings)
-                        )
-                        """
-                    }
-                    .joined(separator: ",\n")
-                )
+        \((executableTargets + binaryTargets).joined(separator: "\n"))
             ]
         )\n
         """
-        try Data(contents.utf8).write(to: packageSwift)
+    }
+
+    private func build() async throws {
+        let xtoolDir = URL(fileURLWithPath: "xtool")
+        let packageDir = xtoolDir.appendingPathComponent(".xtool-tmp")
+        try? FileManager.default.removeItem(at: packageDir)
+        try FileManager.default.createDirectory(at: packageDir, withIntermediateDirectories: true)
+
+        let packageSwift = packageDir.appendingPathComponent("Package.swift")
+        try Data(Self.builderManifest(for: plan).utf8).write(to: packageSwift)
+
+        let frameworksDir = packageDir.appendingPathComponent(Self.frameworksDirectoryName, isDirectory: true)
+        let packageRoot = URL(fileURLWithPath: buildSettings.packagePath).standardizedFileURL
+        for framework in plan.allProducts.flatMap(\.frameworks) {
+            let link = frameworksDir.appendingPathComponent("\(framework.name).xcframework")
+            guard !FileManager.default.fileExists(atPath: link.path) else { continue }
+            try FileManager.default.createDirectory(at: frameworksDir, withIntermediateDirectories: true)
+            let destination = URL(fileURLWithPath: framework.path, relativeTo: packageRoot).standardizedFileURL
+            try FileManager.default.createSymbolicLink(at: link, withDestinationURL: destination)
+        }
 
         for product in plan.allProducts {
             let sources: URL = packageDir.appendingPathComponent("Sources/\(product.targetName)", isDirectory: true)
@@ -176,6 +202,8 @@ public struct Packer: Sendable {
                     try await packFile(srcName: "lib\(name).dylib", dstName: "Frameworks/lib\(name).dylib", sign: true)
                 case .root(let source):
                     try await packFileToRoot(srcName: source)
+                case .framework(let name, _):
+                    try await packFile(srcName: "\(name).framework", dstName: "Frameworks/\(name).framework", sign: true)
                 }
             }
         }

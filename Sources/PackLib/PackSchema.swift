@@ -20,6 +20,9 @@ public struct PackSchemaBase: Codable, Sendable {
     public var iconPath: String?
     public var resources: [String]?
 
+    public var frameworks: [String]?
+    public var prebuild: [String]?
+
     public var extensions: [Extension]?
 
     /// Skip auto-creating the LSP support file if it's missing.
@@ -30,6 +33,7 @@ public struct PackSchemaBase: Codable, Sendable {
         public var bundleID: String?
         public var infoPath: String
         public var resources: [String]?
+        public var frameworks: [String]?
         public var entitlementsPath: String?
     }
 }
@@ -75,6 +79,20 @@ public struct PackSchema: Sendable {
                 throw StringError("xtool.yml: iconPath should have a 'png' path extension. Got '\(ext)'.")
             }
         }
+
+        let allFrameworks = (base.frameworks ?? []) + (base.extensions ?? []).flatMap { $0.frameworks ?? [] }
+        for framework in allFrameworks {
+            let ext = URL(fileURLWithPath: framework).pathExtension
+            guard ext == "xcframework" else {
+                throw StringError("""
+                xtool.yml: frameworks entries must be '.xcframework' bundles. Got '\(framework)'.
+                """)
+            }
+        }
+    }
+
+    public static func expandBuildVariables(in path: String, configuration: BuildConfiguration) -> String {
+        path.replacingOccurrences(of: "$(CONFIGURATION)", with: configuration.rawValue)
     }
 
     // swiftlint:disable:next force_try

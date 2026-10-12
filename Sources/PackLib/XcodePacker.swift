@@ -97,12 +97,13 @@ public struct XcodePacker {
                 buildFiles: [],
             )
             let resources = try resourceReferences(for: product, at: root)
+            let frameworks = try frameworkReferences(for: product)
             groups.append(.group(.init(
                 objectID: nil,
                 name: product.product,
                 path: try .init(base: .group, path: product.product),
                 includeInIndex: nil,
-                children: [.fileReference(source), .fileReference(info)] + resources,
+                children: [.fileReference(source), .fileReference(info)] + resources + frameworks,
             )))
 
             let productFilename = "\(product.targetName).\(product.type == .application ? "app" : "appex")"
@@ -141,6 +142,15 @@ public struct XcodePacker {
                 ),
             )
             var phases = [sourcePhase, frameworksPhase]
+            if !frameworks.isEmpty {
+                phases.append(.copy(.init(
+                    objectID: nil,
+                    name: "Embed Frameworks",
+                    bundleBasePath: .frameworksDir,
+                    relativePath: "",
+                    scope: .always,
+                )))
+            }
             if !resources.isEmpty {
                 phases.append(.copy(.init(
                     objectID: nil,
@@ -272,7 +282,39 @@ public struct XcodePacker {
         }
     }
 
-    private func buildFileProperties(removeHeadersOnCopy: Bool = false) -> XCSchema.BuildFileProperties {
+    private func frameworkReferences(for product: Plan.Product) throws -> [XCSchema.Reference] {
+        try product.frameworks.map { framework in
+            let isAbsolute = (framework.path as NSString).isAbsolutePath
+            let referencePath = isAbsolute ? framework.path : ("../.." as NSString).appendingPathComponent(framework.path)
+            let target = XCSchema.LocalTargetReference(targetName: product.targetName)
+            return .fileReference(.init(
+                objectID: nil,
+                path: try .init(base: isAbsolute ? .absolute : .project, path: referencePath),
+                explicitFileType: .init(fileTypeID: "wrapper.xcframework"),
+                expectedSignature: nil,
+                textEncoding: nil,
+                lineEnding: nil,
+                includeInIndex: nil,
+                buildFiles: [
+                    .init(
+                        objectID: nil,
+                        buildPhase: .named(target: target, kind: .frameworks, name: nil),
+                        properties: buildFileProperties(),
+                    ),
+                    .init(
+                        objectID: nil,
+                        buildPhase: .named(target: target, kind: .copy, name: "Embed Frameworks"),
+                        properties: buildFileProperties(codeSignOnCopy: true),
+                    ),
+                ],
+            ))
+        }
+    }
+
+    private func buildFileProperties(
+        removeHeadersOnCopy: Bool = false,
+        codeSignOnCopy: Bool = false
+    ) -> XCSchema.BuildFileProperties {
         XCSchema.BuildFileProperties(
             platformFilters: [],
             additionalBuildFlags: nil,
@@ -281,7 +323,7 @@ public struct XcodePacker {
                 headerRole: nil,
                 machInterfaceGeneration: nil,
                 isWeak: false,
-                codeSignOnCopy: false,
+                codeSignOnCopy: codeSignOnCopy,
                 codeGeneration: .default,
                 headerPreservation: removeHeadersOnCopy ? .removeOnCopy : .keep,
                 decompress: false,

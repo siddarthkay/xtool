@@ -4,6 +4,7 @@ import PackLib
 import XKit
 import Dependencies
 import XUtils
+import Subprocess
 
 struct PackOperation {
     struct BuildOptions: ParsableArguments {
@@ -60,6 +61,8 @@ struct PackOperation {
             options: []
         )
 
+        try await runPrebuildCommands(schema.prebuild ?? [], buildSettings: buildSettings)
+
         let planner = Planner(
             buildSettings: buildSettings,
             schema: schema
@@ -79,7 +82,21 @@ struct PackOperation {
         let productsWithEntitlements = plan
             .allProducts
             .compactMap { p in p.entitlementsPath.map { (p, $0) } }
-        if !productsWithEntitlements.isEmpty {
+        let needsAdhocSignature: Bool
+        #if os(macOS)
+        needsAdhocSignature = false
+        #else
+        needsAdhocSignature = buildSettings.triple.contains("simulator")
+        #endif
+        if productsWithEntitlements.isEmpty && needsAdhocSignature {
+            print("Ad-hoc signing...")
+            try await Signer.first().sign(
+                app: bundle,
+                identity: .adhoc,
+                entitlementMapping: [bundle: try Entitlements(entitlements: [])],
+                progress: { _ in }
+            )
+        } else if !productsWithEntitlements.isEmpty {
             let mapping = try await withThrowingTaskGroup(of: (URL, Entitlements).self) { group in
                 for (product, path) in productsWithEntitlements {
                     group.addTask {
@@ -101,6 +118,28 @@ struct PackOperation {
         }
 
         return bundle
+    }
+
+    private func runPrebuildCommands(_ commands: [String], buildSettings: BuildSettings) async throws {
+        guard !commands.isEmpty else { return }
+        print("Running prebuild commands...")
+        for command in commands {
+            print("+ \(command)")
+            let result = try await Subprocess.run(
+                .path("/bin/sh"),
+                arguments: ["-c", command],
+                environment: .inherit.updating([
+                    "CONFIGURATION": buildSettings.configuration.rawValue,
+                    "TRIPLE": buildSettings.triple,
+                ]),
+                platformOptions: .withGracefulShutDown,
+                output: .currentStandardOutput,
+                error: .currentStandardError,
+            )
+            guard result.terminationStatus.isSuccess else {
+                throw Console.Error("prebuild command failed (\(result.terminationStatus)): \(command)")
+            }
+        }
     }
 }
 
@@ -144,6 +183,20 @@ struct DevBuildCommand: AsyncParsableCommand {
         )
     ) var triple: String?
 
+    @Option(
+        help: ArgumentHelp(
+            "UDID of a device to register when signing",
+            discussion: """
+            Development provisioning profiles must include at least one device. \
+            Pass the UDID of a device to add it to the profile when using `--sign` \
+            without installing, e.g. in CI.
+            """
+        )
+    ) var deviceUdid: String?
+
+    @Option(help: "Name to register the device under (used with --device-udid)")
+    var deviceName: String = "xtool device"
+
     func run() async throws {
         let signingAuthToken: AuthToken?
         if sign {
@@ -166,9 +219,12 @@ struct DevBuildCommand: AsyncParsableCommand {
                 auth: signingAuthToken.authData(),
                 delegate: installDelegate
             )
+            let targetDevice = deviceUdid.map {
+                SigningContext.TargetDevice(udid: $0, name: deviceName)
+            }
             do {
                 defer { print() }
-                try await installer.signInPlace(app: url)
+                try await installer.signInPlace(app: url, targetDevice: targetDevice)
             } catch let error as CancellationError {
                 throw error
             } catch {
@@ -294,8 +350,6 @@ struct DevCommand: AsyncParsableCommand {
 extension BuildConfiguration: ExpressibleByArgument {}
 
 #if os(macOS)
-import Subprocess
-
 struct SimInstallOperation {
     var path: URL
 

@@ -85,6 +85,7 @@ public struct Planner: Sendable {
             idSpecifier: schema.idSpecifier,
             iconPath: schema.iconPath,
             rootResources: schema.resources,
+            frameworks: schema.frameworks,
             entitlementsPath: schema.entitlementsPath
         )
 
@@ -101,6 +102,7 @@ public struct Planner: Sendable {
                             idSpecifier: ext.bundleID.flatMap(PackSchema.IDSpecifier.bundleID) ?? .orgID(app.bundleID),
                             iconPath: nil,
                             rootResources: ext.resources,
+                            frameworks: ext.frameworks,
                             entitlementsPath: ext.entitlementsPath
                         )
                     }
@@ -123,6 +125,7 @@ public struct Planner: Sendable {
         idSpecifier: PackSchema.IDSpecifier,
         iconPath: String?,
         rootResources: [String]?,
+        frameworks: [String]?,
         entitlementsPath: String?
     ) async throws -> Plan.Product {
         let library = try selectLibrary(
@@ -142,7 +145,11 @@ public struct Planner: Sendable {
             // host-only dependencies (e.g. SwiftSyntaxMacros).
             if target.type == "macro" { continue }
             if target.moduleType == "BinaryTarget" {
-                resources.append(.binaryTarget(name: targetName))
+                let packageURL = URL(fileURLWithPath: targetPackage.path)
+                let frameworkName = try target.path.flatMap { path in
+                    try Self.frameworkName(ofXCFramework: URL(fileURLWithPath: path, relativeTo: packageURL))
+                }
+                resources.append(.binaryTarget(name: frameworkName ?? targetName))
             }
             if target.resources?.isEmpty == false {
                 resources.append(.bundle(package: targetPackage.name, target: targetName))
@@ -160,7 +167,19 @@ public struct Planner: Sendable {
         }
 
         if let rootResources {
-            resources += rootResources.map { .root(source: $0) }
+            resources += rootResources.map { .root(source: expand($0)) }
+        }
+
+        for framework in frameworks ?? [] {
+            let path = expand(framework)
+            let url = URL(fileURLWithPath: path, relativeTo: URL(fileURLWithPath: buildSettings.packagePath))
+            guard let name = try Self.frameworkName(ofXCFramework: url) else {
+                throw StringError("""
+                xtool.yml: '\(path)' does not contain a dynamic framework. \
+                Only xcframeworks that wrap a '.framework' can be embedded.
+                """)
+            }
+            resources.append(.framework(name: name, path: path))
         }
 
         let bundleID = idSpecifier.formBundleID(product: library.name)
@@ -216,6 +235,38 @@ public struct Planner: Sendable {
             iconPath: iconPath,
             entitlementsPath: entitlementsPath
         )
+    }
+
+    private func expand(_ path: String) -> String {
+        PackSchema.expandBuildVariables(in: path, configuration: buildSettings.configuration)
+    }
+
+    private struct XCFrameworkInfo: Decodable {
+        struct Library: Decodable {
+            let libraryPath: String
+
+            private enum CodingKeys: String, CodingKey {
+                case libraryPath = "LibraryPath"
+            }
+        }
+
+        let availableLibraries: [Library]
+
+        private enum CodingKeys: String, CodingKey {
+            case availableLibraries = "AvailableLibraries"
+        }
+    }
+
+    static func frameworkName(ofXCFramework url: URL) throws -> String? {
+        guard url.pathExtension == "xcframework" else { return nil }
+        let infoURL = url.appendingPathComponent("Info.plist")
+        guard FileManager.default.fileExists(atPath: infoURL.path) else { return nil }
+        let info = try PropertyListDecoder().decode(XCFrameworkInfo.self, from: Data(contentsOf: infoURL))
+        return info.availableLibraries
+            .map { URL(fileURLWithPath: $0.libraryPath) }
+            .first { $0.pathExtension == "framework" }?
+            .deletingPathExtension()
+            .lastPathComponent
     }
 
     private func dumpDependencies() async throws -> PackageDependency {
@@ -308,6 +359,7 @@ public struct Plan: Sendable {
         case binaryTarget(name: String)
         case library(name: String)
         case root(source: String)
+        case framework(name: String, path: String)
     }
 
     public struct Product: Sendable {
@@ -322,6 +374,13 @@ public struct Plan: Sendable {
 
         public var targetName: String {
             "\(self.product)-\(self.type.targetSuffix)"
+        }
+
+        public var frameworks: [(name: String, path: String)] {
+            resources.compactMap {
+                guard case .framework(let name, let path) = $0 else { return nil }
+                return (name, path)
+            }
         }
 
         public func directory(inApp baseDir: URL) -> URL {
@@ -413,6 +472,7 @@ private struct PackageDump: Decodable {
         let name: String
         let moduleType: String
         let type: String?
+        let path: String?
         let productDependencies: [String]?
         let targetDependencies: [String]?
         let resources: [Resource]?
@@ -428,6 +488,7 @@ private struct PackageDump: Decodable {
     }
 
     let name: String
+    let path: String
     let products: [Product]?
     let targets: [Target]?
     let platforms: [Platform]?

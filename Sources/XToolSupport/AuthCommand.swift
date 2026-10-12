@@ -24,6 +24,11 @@ struct AuthOperation {
     var mode: AuthMode?
     var quiet = false
 
+    // App Store Connect API key credentials for non-interactive `--mode key` logins.
+    var keyID: String?
+    var issuerID: String?
+    var keyPath: String?
+
     func run() async throws {
         if let token = try? AuthToken.saved(), !logoutFromExisting {
             if !quiet {
@@ -56,13 +61,13 @@ struct AuthOperation {
     }
 
     private func logInWithKey() async throws -> AuthToken {
-        let id = try await Console.promptRequired("Key ID: ", existing: nil)
+        let id = try await Console.promptRequired("Key ID: ", existing: keyID)
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
-        let issuerID = try await Console.promptRequired("Issuer ID: ", existing: nil)
+        let issuerID = try await Console.promptRequired("Issuer ID: ", existing: issuerID)
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
-        let path = try await Console.promptRequired("Key path: ", existing: nil)
+        let path = try await Console.promptRequired("Key path: ", existing: keyPath)
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
         let pem = try String(decoding: Data(contentsOf: URL(fileURLWithPath: path)), as: UTF8.self)
@@ -134,12 +139,22 @@ struct AuthLoginCommand: AsyncParsableCommand {
     @Option(name: [.short, .long]) var password: String?
     @Option(name: [.short, .long]) var mode: AuthMode?
 
+    @Option(help: "App Store Connect API key ID (for --mode key)") var keyID: String?
+    @Option(help: "App Store Connect API issuer ID (for --mode key)") var issuerID: String?
+    @Option(
+        help: "Path to the App Store Connect API .p8 key (for --mode key)",
+        completion: .file(extensions: ["p8"])
+    ) var keyPath: String?
+
     func run() async throws {
         try await AuthOperation(
             username: username,
             password: password,
             logoutFromExisting: true,
-            mode: mode
+            mode: mode,
+            keyID: keyID,
+            issuerID: issuerID,
+            keyPath: keyPath
         ).run()
     }
 }

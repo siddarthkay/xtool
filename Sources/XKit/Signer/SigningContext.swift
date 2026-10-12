@@ -14,6 +14,11 @@ public struct SigningContext: Sendable {
     public struct TargetDevice: Sendable, Hashable {
         public var udid: String
         public var name: String
+
+        public init(udid: String, name: String) {
+            self.udid = udid
+            self.name = name
+        }
     }
 
     public var auth: DeveloperAPIAuthData
